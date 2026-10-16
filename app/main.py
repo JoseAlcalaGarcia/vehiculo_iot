@@ -25,6 +25,7 @@ import logging
 from datetime import datetime, timezone
 
 import mysql.connector
+import asyncio
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -558,6 +559,90 @@ async def ruta_obtener_movimientos_demo(id_demo: int):
 async def ruta_eliminar_vehiculo(id_vehiculo: int):
     resultado = ejecutar_operacion(eliminar_vehiculo, id_vehiculo)
     await notificar("vehiculo", "eliminar", resultado)
+    return resultado
+
+
+# -- EJECUCION DE LA DEMO
+
+
+@app.post("/api/vehiculos/{id_vehiculo}/demos/{id_demo}/ejecutar")
+async def ruta_ejecutar_demo(id_vehiculo: int, id_demo: int):
+    # 1. Verificar que la DEMO pertenezca al vehículo
+    demos = ejecutar_operacion(obtener_demos, id_vehiculo)
+
+    demo = next(
+        (d for d in demos if d["id_demo"] == id_demo and d["activo"]),
+        None,
+    )
+
+    if demo is None:
+        raise HTTPException(
+            status_code=404,
+            detail="La DEMO no existe, no pertenece al vehículo o está inactiva.",
+        )
+
+    # 2. Consultar los movimientos de la DEMO
+    movimientos = ejecutar_operacion(
+        obtener_movimientos_demo,
+        id_demo,
+    )
+
+    if not movimientos:
+        raise HTTPException(
+            status_code=400,
+            detail="La DEMO no contiene movimientos.",
+        )
+
+    # 3. Ejecutar los movimientos en el orden indicado
+    movimientos = sorted(
+        movimientos,
+        key=lambda movimiento: movimiento["orden"],
+    )
+
+    ultimo_id_comando = None
+
+    for movimiento in movimientos:
+        ultimo_id_comando = movimiento["id_comando"]
+
+        evento = {
+            "tipo": "demo",
+            "accion": "ejecutar_movimiento",
+            "datos": {
+                "id_vehiculo": id_vehiculo,
+                "id_demo": id_demo,
+                "id_comando": movimiento["id_comando"],
+                "orden": movimiento["orden"],
+                "duracion_ms": movimiento["duracion_ms"],
+                "pausa_ms": movimiento["pausa_ms"],
+            },
+        }
+
+        # Enviar el movimiento a los clientes conectados por WebSocket
+        await manager.enviar_a_todos(evento)
+
+        # Respetar duración y pausa configuradas, en milisegundos
+        await asyncio.sleep(movimiento["duracion_ms"] / 1000)
+        await asyncio.sleep(movimiento["pausa_ms"] / 1000)
+
+    # 4. Actualizar el estado final usando sp_actualizar_estado
+    resultado_estado = ejecutar_operacion(
+        actualizar_estado_bd,
+        id_vehiculo,
+        ultimo_id_comando,
+        True,
+    )
+
+    # 5. Notificar que terminó la DEMO
+    resultado = {
+        "mensaje": "DEMO ejecutada correctamente.",
+        "id_vehiculo": id_vehiculo,
+        "id_demo": id_demo,
+        "movimientos_ejecutados": len(movimientos),
+        "estado_final": resultado_estado,
+    }
+
+    await notificar("demo", "finalizada", resultado)
+
     return resultado
 
 
